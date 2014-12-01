@@ -1,0 +1,69 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "List of SNS topics for each component",
+    "Parameters": {
+        "Environment": {
+            "Description": "Deployment enviroment",
+            "Type": "String",
+            "Default": "dev",
+            "AllowedValues": ["dev", "qa", "stage", "prod"],
+            "ConstraintDescription": "must be one of the predefined enviroments"
+        },
+        "Component": {
+            "Description": "Name of the component",
+            "Type": "String",
+            "AllowedValues": ["vpc", "nat", "radar"],
+            "ConstraintDescription": "This constraint is a reminder to specify the ComponentOwner email address"
+        }
+    },
+    "Mappings": {
+        "ComponentOwner": {
+            "vpc": {"email": "arezafar@users.noreply.github.com"},
+            "nat": {"email": "arezafar@users.noreply.github.com"},
+            "radar": {"email": "arezafar@users.noreply.github.com"}
+        }
+    },
+    "Resources": {
+        "NoticeSnsTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": {"Fn::Join": ["-", [{"Ref": "Component"}, {"Ref": "Environment"}, "notice"]]},
+                "Subscription": [ {
+                    "Endpoint": { "Fn::FindInMap": [ "ComponentOwner", {"Ref": "Component"}, "email" ] },
+                    "Protocol": "email"
+                } ]
+            }
+        },
+        "WarningSnsTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": {"Fn::Join": ["-", [{"Ref": "Component"}, {"Ref": "Environment"}, "warning"]]},
+                "Subscription": [ {
+                    "Endpoint": { "Fn::FindInMap": [ "ComponentOwner", {"Ref": "Component"}, "email" ] },
+                    "Protocol": "email"
+                } ]
+            }
+        },
+        "CriticalSnsTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "TopicName": {"Fn::Join": ["-", [{"Ref": "Component"}, {"Ref": "Environment"}, "critical"]]},
+                "Subscription": [ {
+                    "Endpoint": { "Fn::FindInMap": [ "ComponentOwner", {"Ref": "Component"}, "email" ] },
+                    "Protocol": "email"
+                } ]
+            }
+        }
+    },
+    "Outputs": {
+        "NoticeSnsTopic": {
+            "Value": {"Ref": "NoticeSnsTopic"}
+        },
+        "WarningSnsTopic": {
+            "Value": {"Ref": "WarningSnsTopic"}
+        },
+        "CriticalSnsTopic": {
+            "Value": {"Ref": "CriticalSnsTopic"}
+        }
+    }
+}

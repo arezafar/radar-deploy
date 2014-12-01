@@ -1,0 +1,17 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Elastic IP resource for association with instances (IP address given to MasterLock to update DNS entries)",
+    "Resources": {
+        "Eip": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc"
+            }
+        }
+    },
+    "Outputs": {
+        "AllocationId": {
+            "Value": {"Fn::GetAtt": ["Eip", "AllocationId"]}
+        }
+    }
+}

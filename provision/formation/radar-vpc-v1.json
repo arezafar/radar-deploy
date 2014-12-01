@@ -1,0 +1,435 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "VPC with 2 subnets per AZ, public and private. CFN Stack Naming Convention = region-vpc-env | example: useast1-vpc-prod",
+    "Parameters": {
+        "Environment": {
+            "Description": "Deployment enviroment for the VPC",
+            "Type": "String",
+            "Default": "dev",
+            "AllowedValues": ["dev", "qa", "stage", "prod"],
+            "ConstraintDescription": "must be one of the predefined enviroments"
+        },
+        "Zone1": {
+            "Description": "Availablity Zone 1",
+            "Type": "String",
+            "Default": "us-east-1a"
+        },
+        "Zone2": {
+            "Description": "Availablity Zone 2",
+            "Type": "String",
+            "Default": "us-east-1d"
+        }
+    },
+    "Mappings": {
+        "AwsNatAmi": {
+            "us-east-1": {"AMI": "ami-4f9fee26"},
+            "us-west-2": {"AMI": "ami-52ff7262"},
+            "us-west-1": {"AMI": "ami-3bcc9e7e"},
+            "eu-west-1": {"AMI": "ami-0b5b6c7f"},
+            "ap-southeast-1": {"AMI": "ami-02eb9350"},
+            "ap-southeast-2": {"AMI": "ami-ab990e91"},
+            "ap-northeast-1": {"AMI": "ami-14d86d15"},
+            "sa-east-1": {"AMI": "ami-0439e619"}
+        },
+        "SubnetConfig": {
+            "VPC": {"CIDR": "10.0.0.0/16"},
+            "Zone1Public": {"CIDR": "10.0.1.0/20"},
+            "Zone2Public": {"CIDR": "10.0.16.0/20"},
+            "Zone3Public": {"CIDR": "10.0.32.0/20"},
+            "Zone1Private": {"CIDR": "10.0.48.0/20"},
+            "Zone2Private": {"CIDR": "10.0.64.0/20"},
+            "Zone3Private": {"CIDR": "10.0.80.0/20"}
+        }
+    },
+    "Resources": {
+        "VPC": {
+            "Type": "AWS::EC2::VPC",
+            "Properties": {
+                "CidrBlock": {"Fn::FindInMap": [ "SubnetConfig", "VPC", "CIDR" ]},
+                "EnableDnsSupport": "true",
+                "EnableDnsHostnames": "true",
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "Zone1PublicSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "CidrBlock": {"Fn::FindInMap": [ "SubnetConfig", "Zone1Public", "CIDR" ]},
+                "AvailabilityZone": {"Ref": "Zone1"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "Zone2PublicSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "CidrBlock": {"Fn::FindInMap": [ "SubnetConfig", "Zone2Public", "CIDR" ]},
+                "AvailabilityZone": {"Ref": "Zone2"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "InternetGateway": {
+            "Type": "AWS::EC2::InternetGateway",
+            "Properties": {
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "GatewayToInternet": {
+            "Type": "AWS::EC2::VPCGatewayAttachment",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "InternetGatewayId": {"Ref": "InternetGateway"}
+            }
+        },
+        "PublicRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "PublicRoute": {
+            "Type": "AWS::EC2::Route",
+            "DependsOn": "GatewayToInternet",
+            "Properties": {
+                "RouteTableId": {"Ref": "PublicRouteTable"},
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "GatewayId": {"Ref": "InternetGateway"}
+            }
+        },
+        "Zone1PublicSubnetRouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone1PublicSubnet"},
+                "RouteTableId": {"Ref": "PublicRouteTable"}
+            }
+        },
+        "Zone2PublicSubnetRouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone2PublicSubnet"},
+                "RouteTableId": {"Ref": "PublicRouteTable"}
+            }
+        },
+        "PublicNacl": {
+            "Type": "AWS::EC2::NetworkAcl",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "InboundHttpPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "100",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "80", "To": "80"}
+            }
+        },
+        "InboundAppPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "101",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "8080", "To": "8080"}
+            }
+        },
+        "InboundHttpsPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "102",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "443", "To": "443"}
+            }
+        },
+        "InboundSSHPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "103",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "22", "To": "22"}
+            }
+        },
+        "InboundTcpDynamicPortsPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "110",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "1024", "To": "65535"}
+            }
+        },
+        "InboundUdpDynamicPortsPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "200",
+                "Protocol": "17",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "1024", "To": "65535"}
+            }
+        },
+        "OutboundTcpDynamicPortPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "300",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "true",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "0", "To": "65535"}
+            }
+        },
+        "OutboundUdpDynamicPortPublicNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PublicNacl"},
+                "RuleNumber": "400",
+                "Protocol": "17",
+                "RuleAction": "allow",
+                "Egress": "true",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "0", "To": "65535"}
+            }
+        },
+        "Zone1PublicSubnetNaclAssociation": {
+            "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone1PublicSubnet"},
+                "NetworkAclId": {"Ref": "PublicNacl"}
+            }
+        },
+        "Zone2PublicSubnetNaclAssociation": {
+            "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone2PublicSubnet"},
+                "NetworkAclId": {"Ref": "PublicNacl"}
+            }
+        },
+        "Zone1PrivateSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "CidrBlock": {"Fn::FindInMap": [ "SubnetConfig", "Zone1Private", "CIDR" ]},
+                "AvailabilityZone": {"Ref": "Zone1"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Private"}
+                ]
+            }
+        },
+        "Zone2PrivateSubnet": {
+            "Type": "AWS::EC2::Subnet",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "CidrBlock": {"Fn::FindInMap": [ "SubnetConfig", "Zone2Private", "CIDR" ]},
+                "AvailabilityZone": {"Ref": "Zone2"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Private"}
+                ]
+            }
+        },
+        "Zone1PrivateRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Private"}
+                ]
+            }
+        },
+        "Zone2PrivateRouteTable": {
+            "Type": "AWS::EC2::RouteTable",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Private"}
+                ]
+            }
+        },
+        "Zone1PrivateSubnetRouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone1PrivateSubnet"},
+                "RouteTableId": {"Ref": "Zone1PrivateRouteTable"}
+            }
+        },
+        "Zone2PrivateSubnetRouteTableAssociation": {
+            "Type": "AWS::EC2::SubnetRouteTableAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone2PrivateSubnet"},
+                "RouteTableId": {"Ref": "Zone2PrivateRouteTable"}
+            }
+        },
+        "PrivateNacl": {
+            "Type": "AWS::EC2::NetworkAcl",
+            "Properties": {
+                "VpcId": {"Ref": "VPC"},
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Private"}
+                ]
+            }
+        },
+        "InboundTcpDynamicPortsPrivateNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PrivateNacl"},
+                "RuleNumber": "500",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "0", "To": "65535"}
+            }
+        },
+        "InboundUdpDynamicPortsPrivateNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PrivateNacl"},
+                "RuleNumber": "600",
+                "Protocol": "17",
+                "RuleAction": "allow",
+                "Egress": "false",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "0", "To": "65535"}
+            }
+        },
+        "OutboundTcpDynamicPortsPrivateNaclEntry": {
+            "Type": "AWS::EC2::NetworkAclEntry",
+            "Properties": {
+                "NetworkAclId": {"Ref": "PrivateNacl"},
+                "RuleNumber": "700",
+                "Protocol": "6",
+                "RuleAction": "allow",
+                "Egress": "true",
+                "CidrBlock": "0.0.0.0/0",
+                "PortRange": {"From": "0", "To": "65535"}
+            }
+        },
+        "Zone1PrivateSubnetNaclAssociation": {
+            "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone1PrivateSubnet"},
+                "NetworkAclId": {"Ref": "PrivateNacl"}
+            }
+        },
+        "Zone2PrivateSubnetNaclAssociation": {
+            "Type": "AWS::EC2::SubnetNetworkAclAssociation",
+            "Properties": {
+                "SubnetId": {"Ref": "Zone2PrivateSubnet"},
+                "NetworkAclId": {"Ref": "PrivateNacl"}
+            }
+        }
+    },
+    "Outputs": {
+        "Environment": {
+            "Description": "VPC Environment",
+            "Value": {"Ref": "Environment"}
+        },
+        "VpcId": {
+            "Description": "A VPC ID.",
+            "Value": {"Ref": "VPC"}
+        },
+        "PublicRouteTableId": {
+            "Description": "ID of VPC public route table",
+            "Value": {"Ref": "PublicRouteTable"}
+        },
+        "Zone1PrivateRouteTableId": {
+            "Description": "ID of VPC private route table in zone1",
+            "Value": {"Ref": "Zone1PrivateRouteTable"}
+        },
+        "Zone2PrivateRouteTableId": {
+            "Description": "ID of VPC private route table in zone2",
+            "Value": {"Ref": "Zone2PrivateRouteTable"}
+        }
+    }
+}

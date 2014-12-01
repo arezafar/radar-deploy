@@ -1,0 +1,434 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "NAT device & Bastion Host for the VPC. Stack Naming Convention = region-nat-env | example: useast1-nat-prod",
+    "Parameters": {
+        "Environment": {
+            "Description": "Deployment enviroment for the NAT",
+            "Type": "String",
+            "Default": "dev",
+            "AllowedValues": ["dev", "qa", "stage", "prod"],
+            "ConstraintDescription": "must be one of the predefined enviroments"
+        },
+        "KeyName": {
+            "Description": "Name of an existing EC2 KeyPair to enable SSH access to the hosts",
+            "Type": "String",
+            "MinLength": "1",
+            "MaxLength": "255",
+            "AllowedPattern": "[\\x20-\\x7E]*",
+            "ConstraintDescription": "can contain only ASCII characters."
+        },
+        "NatInstanceType": {
+            "Description": "NAT Device EC2 instance type",
+            "Type": "String",
+            "Default": "m1.small",
+            "AllowedValues": ["t1.micro", "m1.small", "m1.medium", "m1.large", "m1.xlarge", "m2.xlarge", "m2.2xlarge", "m2.4xlarge", "m3.xlarge", "m3.2xlarge", "c1.medium", "c1.xlarge", "cc1.4xlarge", "cc2.8xlarge", "cg1.4xlarge"],
+            "ConstraintDescription": "must be a valid EC2 instance type."
+        },
+        "VpcId": {
+            "Description": "ID of VPC to launch the NAT instance into",
+            "Type": "String"
+        },
+        "PublicSubnetId": {
+            "Description": "ID of the subnet that you want to launch the NAT instance into",
+            "Type": "String"
+        },
+        "PrivateRouteTableId": {
+            "Description": "ID of the routing table in the private subnet",
+            "Type": "String"
+        },
+        "Zone": {
+            "Description": "Availablity Zone",
+            "Type": "String",
+            "Default": "us-east-1a"
+        },
+        "SshLocation": {
+            "Description": "Lockdown SSH access to the bastion host (default can be accessed from anywhere)",
+            "Type": "String",
+            "MinLength": "9",
+            "MaxLength": "18",
+            "Default": "0.0.0.0/0",
+            "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+            "ConstraintDescription": "must be a valid CIDR range of the form x.x.x.x/x."
+        },
+        "NoticeSnsTopicArn": {
+            "Type": "String",
+            "Default": "arn:aws:sns:us-east-1:228089722724:nat-dev-notice"
+        },
+        "WarningSnsTopicArn": {
+            "Type": "String",
+            "Default": "arn:aws:sns:us-east-1:228089722724:nat-dev-warning"
+        },
+        "CriticalSnsTopicArn": {
+            "Type": "String",
+            "Default": "arn:aws:sns:us-east-1:228089722724:nat-dev-critical"
+        }
+    },
+    "Mappings": {
+        "AwsNatAmi": {
+            "us-east-1": {"AMI": "ami-4f9fee26"},
+            "us-west-2": {"AMI": "ami-52ff7262"},
+            "us-west-1": {"AMI": "ami-3bcc9e7e"},
+            "eu-west-1": {"AMI": "ami-0b5b6c7f"},
+            "ap-southeast-1": {"AMI": "ami-02eb9350"},
+            "ap-southeast-2": {"AMI": "ami-ab990e91"},
+            "ap-northeast-1": {"AMI": "ami-14d86d15"},
+            "sa-east-1": {"AMI": "ami-0439e619"}
+        },
+        "SubnetConfig": {
+            "VPC": {"CIDR": "10.0.0.0/16"},
+            "Zone1Public": {"CIDR": "10.0.1.0/20"},
+            "Zone2Public": {"CIDR": "10.0.16.0/20"},
+            "Zone3Public": {"CIDR": "10.0.32.0/20"},
+            "Zone1Private": {"CIDR": "10.0.48.0/20"},
+            "Zone2Private": {"CIDR": "10.0.64.0/20"},
+            "Zone3Private": {"CIDR": "10.0.80.0/20"}
+        }
+    },
+    "Resources": {
+        "DeviceUser" : {
+            "Type" : "AWS::IAM::User",
+            "Properties" : {
+                "Path": "/",
+                "Policies": [{
+                    "PolicyName": "root",
+                    "PolicyDocument": {
+                        "Statement": [{
+                            "Action": "cloudwatch:*",
+                            "Effect": "Allow",
+                            "Resource": "*"
+                        },
+                        {
+                            "Action": [
+                                "cloudformation:DescribeStackEvents",
+                                "cloudformation:DescribeStackResource",
+                                "cloudformation:DescribeStackResources",
+                                "cloudformation:DescribeStacks"
+                            ],
+                            "Effect": "Allow",
+                            "Resource": "*"
+                        },
+                        {
+                            "Action": "sns:*",
+                            "Effect": "Allow",
+                            "Resource": "arn:aws:sns:*"
+                        }]
+                    }
+                }]
+            }
+        },
+        "DeviceSnsPolicy" : {
+            "Type" : "AWS::SNS::TopicPolicy",
+            "Properties" : {
+                "PolicyDocument" :  {
+                    "Id" : {"Fn::Join": ["-", ["sns", "policy", "nat", {"Ref": "Environment"}]]},
+                    "Statement" : [ {
+                        "Sid" : {"Fn::Join": ["-", ["sns", "statement", "nat", "publish", {"Ref": "Environment"}]]},
+                        "Effect" : "Allow",
+                        "Principal" : { "AWS": [ "*" ] },
+                        "Action" : "sns:Publish",
+                        "Resource" : "*"
+                    } ]
+                },
+                "Topics" : [
+                    { "Ref" : "NoticeSnsTopicArn" },
+                    { "Ref" : "WarningSnsTopicArn" },
+                    { "Ref" : "CriticalSnsTopicArn" }
+                ]
+            }
+        },
+        "DeviceKey" : {
+            "Type" : "AWS::IAM::AccessKey",
+            "Properties" : {
+                "UserName" : {"Ref": "DeviceUser"}
+            }
+        },
+        "RootDeviceDiskSpaceAlarm": {
+            "Type" : "AWS::CloudWatch::Alarm",
+            "Properties" : {
+                "AlarmDescription": "Alarm if the root partition is running low on disk space",
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [
+                    {"Name": "MountPath", "Value": "/"},
+					{"Name": "Filesystem", "Value": "/dev/xvda1"},
+                    {"Name": "InstanceId", "Value": {"Ref": "NatDevice"}}
+                ],
+                "EvaluationPeriods": "1",
+                "MetricName": "DiskSpaceUtilization",
+				"Namespace": "System/Linux",
+                "Period": "300",
+                "Statistic": "Maximum",
+                "Unit": "Percent",
+                "Threshold": "80",
+                "AlarmActions": [{ "Ref" : "CriticalSnsTopicArn" }],
+                "InsufficientDataActions": [{ "Ref" : "NoticeSnsTopicArn" }],
+                "OKActions": [{ "Ref": "CriticalSnsTopicArn" }]
+            }
+        },
+        "MemoryUtilizationAlarm": {
+            "Type" : "AWS::CloudWatch::Alarm",
+            "Properties" : {
+                "AlarmDescription": "Alarm if instance is using >90% memory",
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [
+                    {"Name": "InstanceId", "Value": {"Ref": "NatDevice"}}
+                ],
+                "EvaluationPeriods": "1",
+                "MetricName": "MemoryUtilization",
+				"Namespace": "System/Linux",
+                "Period": "300",
+                "Statistic": "Maximum",
+                "Unit": "Percent",
+                "Threshold": "90",
+                "AlarmActions": [{ "Ref" : "WarningSnsTopicArn" }],
+                "InsufficientDataActions": [{ "Ref" : "NoticeSnsTopicArn" }],
+                "OKActions": [{ "Ref": "WarningSnsTopicArn" }]
+            }
+        },
+        "CpuUtilizationAlarm": {
+            "Type" : "AWS::CloudWatch::Alarm",
+            "Properties" : {
+                "AlarmDescription": "Alarm if instance is using >90% cpu",
+                "ComparisonOperator": "GreaterThanThreshold",
+                "Dimensions": [
+                    {"Name": "InstanceId", "Value": {"Ref": "NatDevice"}}
+                ],
+                "EvaluationPeriods": "1",
+                "MetricName": "CPUUtilization",
+				"Namespace": "AWS/EC2",
+                "Period": "300",
+                "Statistic": "Average",
+                "Unit": "Percent",
+                "Threshold": "90",
+                "AlarmActions": [{ "Ref" : "CriticalSnsTopicArn" }],
+                "InsufficientDataActions": [{ "Ref" : "NoticeSnsTopicArn" }],
+                "OKActions": [{ "Ref": "CriticalSnsTopicArn" }]
+            }
+        },
+        "StatusCheckAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Alarm if the instance status check is failing.",
+                "Namespace": "AWS/EC2",
+                "MetricName": "StatusCheckFailed_Instance",
+                "Dimensions": [
+                    { "Name": "InstanceId", "Value" : { "Ref" : "NatDevice" }}
+                ],
+                "Statistic": "Maximum",
+                "Period": "60",
+                "EvaluationPeriods": "5",
+                "Threshold": "1",
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+                "AlarmActions": [{ "Ref": "CriticalSnsTopicArn" }],
+                "InsufficientDataActions": [{ "Ref": "NoticeSnsTopicArn" }],
+                "OKActions": [{ "Ref": "CriticalSnsTopicArn" }]
+            }
+        },
+        "SystemStatusCheckAlarm": {
+            "Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Alarm if the system status check is failing.",
+                "Namespace": "AWS/EC2",
+                "MetricName": "StatusCheckFailed_System",
+                "Dimensions": [
+                    { "Name": "InstanceId", "Value" : { "Ref" : "NatDevice" }}
+                ],
+                "Statistic": "Maximum",
+                "Period": "60",
+                "EvaluationPeriods": "1",
+                "Threshold": "1",
+                "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+                "AlarmActions": [{ "Ref": "CriticalSnsTopicArn" }],
+                "InsufficientDataActions": [{ "Ref": "NoticeSnsTopicArn" }],
+                "OKActions": [{ "Ref": "CriticalSnsTopicArn" }]
+            }
+        },
+        "PrivateRouteZone": {
+            "Type": "AWS::EC2::Route",
+            "Properties": {
+                "RouteTableId": {"Ref": "PrivateRouteTableId"},
+                "DestinationCidrBlock": "0.0.0.0/0",
+                "InstanceId": {"Ref": "NatDevice"}
+            }
+        },
+        "NatSecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Enable internal access to the NAT device",
+                "VpcId": {"Ref": "VpcId"},
+                "SecurityGroupIngress": [
+                    {"IpProtocol": "tcp", "FromPort": "80", "ToPort": "80", "CidrIp": "0.0.0.0/0"},
+                    {"IpProtocol": "tcp", "FromPort": "443", "ToPort": "443", "CidrIp": "0.0.0.0/0"},
+                    {"IpProtocol": "tcp", "FromPort": "22", "ToPort": "22", "CidrIp": {"Ref": "SshLocation"} },
+                    {"IpProtocol": "tcp", "FromPort": "49152", "ToPort": "65535", "CidrIp": {"Ref": "SshLocation"} }
+                ],
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ]
+            }
+        },
+        "NatIpAddress": {
+            "Type": "AWS::EC2::EIP",
+            "Properties": {
+                "Domain": "vpc",
+                "InstanceId": {"Ref": "NatDevice"}
+            }
+        },
+        "NatDevice": {
+            "Type": "AWS::EC2::Instance",
+            "DependsOn" : ["NatSecurityGroup", "DeviceKey"],
+            "Properties": {
+                "InstanceType": {"Ref": "NatInstanceType"},
+                "AvailabilityZone": {"Ref": "Zone"},
+                "KeyName": {"Ref": "KeyName"},
+                "Monitoring": "true",
+                "Tags": [
+                    {"Key": "Name", "Value": {"Ref": "AWS::StackName" }},
+                    {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                    {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                    {"Key": "Component", "Value": "vpc"},
+                    {"Key": "Role", "Value": "infrastructure"},
+                    {"Key": "Network", "Value": "Public"}
+                ],
+                "SubnetId": {"Ref": "PublicSubnetId"},
+                "SourceDestCheck": "false",
+                "ImageId": {
+                    "Fn::FindInMap": [ "AwsNatAmi", {"Ref": "AWS::Region"}, "AMI" ]
+                },
+                "SecurityGroupIds": [ {"Ref": "NatSecurityGroup"} ],
+                "UserData": { "Fn::Base64" : { "Fn::Join" : ["", [
+                    "#!/bin/bash\n",
+                    "yum-config-manager --enable epel\n",
+                    "yum install -y aws-apitools-cfn.noarch aws-apitools-mon.noarch perl-core perl-Switch perl-Sys-Syslog perl-LWP-Protocol-https python-boto.noarch git tmux\n",
+                    "yum update -y aws-cfn-bootstrap\n",
+
+                    "# Helper function\n",
+                    "function error_exit\n",
+                    "{\n",
+                    "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", { "Ref" : "NatDeviceWaitHandle" }, "'\n",
+                    "  exit 1\n",
+                    "}\n",
+
+                    "# Setup tools on NAT device\n",
+                    "/opt/aws/bin/cfn-init ",
+                    "   --stack=", { "Ref" : "AWS::StackId" },
+                    "   --resource=NatDevice ",
+                    "   --access-key=",  {"Ref" : "DeviceKey"},
+                    "   --secret-key=", {"Fn::GetAtt": ["DeviceKey", "SecretAccessKey"]},
+                    "   --region=", { "Ref" : "AWS::Region" },
+                    " > /tmp/cfn-init.log 2>&1 || error_exit $(</tmp/cfn-init.log)\n",
+
+                    "# Get Updates _After_ CfnInit Runs\n",
+                    "yum update -y\n",
+
+                    "cat >> /home/ec2-user/.bash_profile <<EOF\n",
+                    "RADAR_ENVIRONMENT=", {"Ref": "Environment"}, "; export RADAR_ENVIRONMENT\n",
+                    "AWS_ACCESS_KEY=", {"Ref": "DeviceKey"}, "; export AWS_ACCESS_KEY\n",
+                    "AWS_ACCESS_KEY_ID=", {"Ref": "DeviceKey"}, "; export AWS_ACCESS_KEY_ID\n",
+                    "AWS_SECRET_ACCESS_KEY=", {"Fn::GetAtt": ["DeviceKey", "SecretAccessKey"]}, "; export AWS_SECRET_ACCESS_KEY\n",
+                    "AWS_SECRET_KEY=", {"Fn::GetAtt": ["DeviceKey", "SecretAccessKey"]}, "; export AWS_SECRET_KEY\n",
+                    "AWS_CLOUDFORMATION_HOME=/opt/aws/apitools/cfn; export AWS_CLOUDFORMATION_HOME\n",
+                    "AWS_CREDENTIALS_FILE=/home/ec2-user/.aws-credentials; export AWS_CREDENTIALS_FILE\n",
+                    "AWS_CREDENTIAL_FILE=$AWS_CREDENTIALS_FILE; export AWS_CREDENTIAL_FILE\n",
+                    "INSTANCE_ID=`curl -f -s http://169.254.169.254/latest/meta-data/instance-id`; export INSTANCE_ID\n",
+                    "INSTANCE_TYPE=`curl -f -s http://169.254.169.254/latest/meta-data/instance-type`; export INSTANCE_TYPE\n",
+                    "INSTANCE_PRIVATE_IP=`curl -f -s http://169.254.169.254/latest/meta-data/local-ipv4`; export INSTANCE_PRIVATE_IP\n",
+                    "INSTANCE_PUBLIC_IP=`curl -f -s http://169.254.169.254/latest/meta-data/public-ipv4`; export INSTANCE_PUBLIC_IP\n",
+                    "INSTANCE_PUBLIC_HOSTNAME=`curl -f -s http://169.254.169.254/latest/meta-data/public-hostname`; export INSTANCE_PUBLIC_HOSTNAME\n",
+                    "INSTANCE_NUM_CPUS=`nproc`; export INSTANCE_NUM_CPUS\n",
+                    "INSTANCE_TOTAL_MEMORY=`cat /proc/meminfo |grep MemTotal|awk '{print $2}'`; export INSTANCE_TOTAL_MEMORY\n",
+                    "EC2_AVAIL_ZONE=`curl -f -s http://169.254.169.254/latest/meta-data/placement/availability-zone`; export EC2_AVAIL_ZONE\n",
+                    "EC2_REGION=", {"Ref": "AWS::Region"}, "; export EC2_REGION\n",
+                    "PATH=$AWS_CLOUDFORMATION_HOME/bin:$PATH\n",
+                    "PATH=/opt/aws/bin:$PATH\n",
+                    "PATH=/usr/local/bin/aws-scripts-mon:$PATH\n",
+                    "export PATH\n",
+                    "EOF\n",
+
+                    "# Start up the cfn-hup daemon to listen for changes to the instance metadata\n",
+                    "/opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'\n",
+
+                    "chmod +x /usr/local/bin/aws-scripts-mon/*.pl\n",
+                    "iptables-restore < /etc/bastion-port-forwarding.iptables-save\n",
+
+                    "# All done so signal success\n",
+                    "/opt/aws/bin/cfn-signal -e 0 -r \"NAT device setup complete\" '", { "Ref" : "NatDeviceWaitHandle" }, "'\n"
+                ]]}}
+            },
+            "Metadata": {
+                "AWS::CloudFormation::Init": {
+                    "config": {
+                        "sources" : {
+                            "/usr/local/bin/" : "http://ec2-downloads.s3.amazonaws.com/cloudwatch-samples/CloudWatchMonitoringScripts-v1.1.0.zip"
+                        },
+                        "files": {
+                            "/home/ec2-user/.aws-credentials": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "AWSAccessKeyId=", {"Ref" : "DeviceKey"}, "\n",
+                                        "AWSSecretKey=", {"Fn::GetAtt": ["DeviceKey", "SecretAccessKey"]}, "\n"
+                                    ]]
+                                },
+                                "group": "ec2-user",
+                                "mode": "000600",
+                                "owner": "ec2-user"
+                            },
+                            "/etc/cron.d/mon-put-instance-data": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "#*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials --mem-util  --disk-path=/ --disk-space-util --auto-scaling=only --from-cron\n",
+                                        "*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials --mem-util  --disk-path=/ --disk-space-util --from-cron\n",
+                                        "*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials             --disk-path=/ --disk-space-used --disk-space-avail  --from-cron\n",
+                                        "\n"
+                                    ]]
+                                },
+                                "group": "root",
+                                "mode": "000600",
+                                "owner": "root"
+                            },
+                            "/etc/cron.daily/yumupdate.sh": {
+                                "content": {
+                                    "Fn::Join": ["", [
+                                        "#!/bin/bash\n",
+                                        "YUM=/usr/bin/yum\n",
+                                        "$YUM -y -R 120 -d 0 -e 0 update yum\n",
+                                        "$YUM -y -R 10 -e 0 -d 0 update\n"
+                                    ]]
+                                },
+                                "group": "root",
+                                "mode": "000755",
+                                "owner": "root"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "NatDeviceWaitHandle" : {
+            "Type" : "AWS::CloudFormation::WaitConditionHandle"
+        },
+        "NatDeviceWaitCondition" : {
+            "Type": "AWS::CloudFormation::WaitCondition",
+            "DependsOn": "NatDevice",
+            "Properties": {
+                "Handle" : {"Ref" : "NatDeviceWaitHandle"},
+                "Timeout" : "900",
+                "Count": "1"
+            }
+        }
+    },
+    "Outputs": {
+        "Environment": {
+            "Description": "VPC Environment",
+            "Value": {"Ref": "Environment"}
+        },
+        "NatDevice": {
+            "Description": "IP of the newly created NAT device (EIP of EC2 instance)",
+            "Value": {"Ref": "NatIpAddress"}
+        }
+    }
+}

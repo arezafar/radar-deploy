@@ -1,0 +1,491 @@
+{"AWSTemplateFormatVersion": "2010-09-09",
+"Description": "EC2 machines running radar service. CFN Stack Naming Convention = region-web?-env? | example: useast1-web-prod",
+"Parameters": {
+    "Environment": {
+        "Description": "Deployment enviroment for the VPC",
+        "Type": "String",
+        "Default": "dev",
+        "AllowedValues": ["dev", "qa", "stage", "prod"],
+        "ConstraintDescription": "must be one of the predefined enviroments"
+    },
+    "KeyName": {
+        "Description": "Name of an existing EC2 KeyPair to enable SSH access to the hosts",
+        "Type": "String",
+        "MinLength": "1",
+        "MaxLength": "255",
+        "AllowedPattern": "[\\x20-\\x7E]*",
+        "ConstraintDescription": "can contain only ASCII characters."
+    },
+    "VpcId": {
+        "Type": "String",
+        "Description": "VpcId of your existing Virtual Private Cloud (VPC)"
+    },
+    "PublicSubnetId": {
+        "Description": "ID of the subnet that you want to launch the App instance into",
+        "Type": "String"
+    },
+    "Zone": {
+        "Type": "String",
+    },
+    "SshLocation": {
+        "Description": "Lockdown SSH access to the host (default can be accessed from anywhere)",
+        "Type": "String",
+        "MinLength": "9",
+        "MaxLength": "18",
+        "Default": "0.0.0.0/0",
+        "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+        "ConstraintDescription": "must be a valid CIDR range of the form x.x.x.x/x."
+    },
+    "RadarAppInstanceType": {
+        "Description": "Radar web/mobile Server EC2 instance type",
+        "Type": "String",
+        "Default": "t2.medium"
+    },
+    "RadarAppAllocationId": {
+        "Type": "String",
+        "Description": "the AllocationId of EIP to be associated with the deployed instnace"
+    },
+    "NoticeSnsTopicArn": {
+        "Type": "String"
+    },
+    "WarningSnsTopicArn": {
+        "Type": "String"
+    },
+    "CriticalSnsTopicArn": {
+        "Type": "String"
+    }
+},
+"Mappings": {
+    "AmazonLinux201403HVMEBS": {
+        "ap-northeast-1": {"64": "ami-"},
+        "ap-southeast-1": {"64": "ami-"},
+        "ap-southeast-2": {"64": "ami-"},
+        "eu-west-1": {"64": "ami-892fe1fe"},
+        "sa-east-1": {"64": "ami-c9e649d4"},
+        "us-east-1": {"64": "ami-76817c1e"},
+        "us-west-1": {"64": "ami-d13845e1"},
+        "us-west-2": {"64": "ami-f0d3d4b5"}
+    }
+},
+
+"Resources": {
+    "InstanceUser": {
+        "Type": "AWS::IAM::User",
+        "Properties": {
+            "Path": "/",
+            "Policies": [{
+                "PolicyName": "root",
+                "PolicyDocument": {
+                    "Statement": [{
+                        "Action": "cloudwatch:*",
+                        "Effect": "Allow",
+                        "Resource": "*"
+                    }, {
+                        "Action": [
+                            "cloudformation:DescribeStackEvents",
+                            "cloudformation:DescribeStackResource",
+                            "cloudformation:DescribeStackResources",
+                            "cloudformation:DescribeStacks"
+                        ],
+                        "Effect": "Allow",
+                        "Resource": "*"
+                    }, {
+                        "Action": "sns:*",
+                        "Effect": "Allow",
+                        "Resource": "arn:aws:sns:*"
+                    }, {
+                        "Action": [
+                            "s3:GetObject",
+                            "s3:GetObjectVersion"
+                        ],
+                        "Effect": "Allow",
+                        "Resource": {"Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "ReleaseBucket"}]]}
+                    }, {
+                        "Action": "s3:*",
+                        "Effect": "Allow",
+                        "Resource": {"Fn::Join": ["", ["arn:aws:s3:::", {"Ref": "LoggingBucket"}]]}
+                    }]
+                }
+            }]
+        }
+    },
+    "InstanceSnsPolicy": {
+        "Type": "AWS::SNS::TopicPolicy",
+        "Properties": {
+            "PolicyDocument":  {
+                "Id": {"Fn::Join": ["-", ["sns", "policy", "radar", {"Ref": "Environment"}]]},
+                "Statement": [{
+                    "Sid": {"Fn::Join": ["-", ["sns", "statement", "radar", "publish", {"Ref": "Environment"}]]},
+                    "Effect": "Allow",
+                    "Principal": {"AWS": {"Fn::GetAtt": ["InstanceUser", "Arn"]}},
+                    "Action": "sns:Publish",
+                    "Resource": "*"
+                }]
+            },
+            "Topics": [
+                {"Ref": "NoticeSnsTopicArn"},
+                {"Ref": "WarningSnsTopicArn"},
+                {"Ref": "CriticalSnsTopicArn"}
+            ]
+        }
+    },
+    "ReleaseS3Policy": {
+        "Type": "AWS::S3::BucketPolicy",
+        "Properties": {
+            "PolicyDocument":  {
+                "Id": {"Fn::Join": ["-", ["s3", "policy", "radar", {"Ref": "Environment"}]]},
+                "Statement": [{
+                    "Sid": {"Fn::Join": ["-", ["s3", "statement", "radar", "release", {"Ref": "Environment"}]]},
+                    "Effect": "Allow",
+                    "Principal": {"AWS": {"Fn::GetAtt": ["InstanceUser", "Arn"]}},
+                    "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+                    "Resource": {"Fn::Join": [ "", ["arn:aws:s3:::", {"Ref": "ReleaseBucket"} , "/*"]]}
+                }]
+            },
+            "Bucket": {"Ref": "ReleaseBucket"}
+        }
+    },
+    "InstanceKey": {
+        "Type": "AWS::IAM::AccessKey",
+        "Properties": {
+            "UserName": {"Ref": "InstanceUser"}
+        }
+    },
+
+    "RootDeviceDiskSpaceAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "AlarmDescription": "Alarm if the root partition is running low on disk space",
+            "ComparisonOperator": "GreaterThanThreshold",
+            "Dimensions": [
+                {"Name": "MountPath", "Value": "/"},
+                {"Name": "Filesystem", "Value": "/dev/xvda1"},
+                {"Name": "InstanceId", "Value": {"Ref": "RadarAppInstance"}}
+            ],
+            "EvaluationPeriods": "1",
+            "MetricName": "DiskSpaceUtilization",
+            "Namespace": "System/Linux",
+            "Period": "300",
+            "Statistic": "Maximum",
+            "Unit": "Percent",
+            "Threshold": "80",
+            "AlarmActions": [{"Ref": "CriticalSnsTopicArn"}],
+            "OKActions": [{"Ref": "CriticalSnsTopicArn"}]
+        }
+    },
+    "MemoryUtilizationAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "AlarmDescription": "Alarm if instance is using >90% memory",
+            "ComparisonOperator": "GreaterThanThreshold",
+            "Dimensions": [
+                {"Name": "InstanceId", "Value": {"Ref": "RadarAppInstance"}}
+            ],
+            "EvaluationPeriods": "1",
+            "MetricName": "MemoryUtilization",
+            "Namespace": "System/Linux",
+            "Period": "300",
+            "Statistic": "Maximum",
+            "Unit": "Percent",
+            "Threshold": "90",
+            "AlarmActions": [{"Ref": "WarningSnsTopicArn"}],
+            "OKActions": [{"Ref": "WarningSnsTopicArn"}]
+        }
+    },
+    "AppCpuUtilizationAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "AlarmDescription": "Alarm if instance is using >90% cpu",
+            "ComparisonOperator": "GreaterThanThreshold",
+            "Dimensions": [
+                {"Name": "InstanceId", "Value": {"Ref": "RadarAppInstance"}}
+            ],
+            "EvaluationPeriods": "1",
+            "MetricName": "CPUUtilization",
+            "Namespace": "AWS/EC2",
+            "Period": "300",
+            "Statistic": "Average",
+            "Unit": "Percent",
+            "Threshold": "90",
+            "AlarmActions": [{"Ref": "CriticalSnsTopicArn"}],
+            "OKActions": [{"Ref": "CriticalSnsTopicArn"}]
+        }
+    },
+    "StatusCheckAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "AlarmDescription": "Alarm if the instance status check is failing.",
+            "Namespace": "AWS/EC2",
+            "MetricName": "StatusCheckFailed_Instance",
+            "Dimensions": [
+                {"Name": "InstanceId", "Value": {"Ref": "RadarAppInstance"}}
+            ],
+            "Statistic": "Maximum",
+            "Period": "60",
+            "EvaluationPeriods": "5",
+            "Threshold": "1",
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "AlarmActions": [{"Ref": "CriticalSnsTopicArn"}],
+            "InsufficientDataActions": [{"Ref": "NoticeSnsTopicArn"}],
+            "OKActions": [{"Ref": "CriticalSnsTopicArn"}]
+        }
+    },
+    "SystemStatusCheckAlarm": {
+        "Type": "AWS::CloudWatch::Alarm",
+        "Properties": {
+            "AlarmDescription": "Alarm if the system status check is failing.",
+            "Namespace": "AWS/EC2",
+            "MetricName": "StatusCheckFailed_System",
+            "Dimensions": [
+                {"Name": "InstanceId", "Value": {"Ref": "RadarAppInstance"}}
+            ],
+            "Statistic": "Maximum",
+            "Period": "60",
+            "EvaluationPeriods": "1",
+            "Threshold": "1",
+            "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+            "AlarmActions": [{"Ref": "CriticalSnsTopicArn"}],
+            "InsufficientDataActions": [{"Ref": "NoticeSnsTopicArn"}],
+            "OKActions": [{"Ref": "CriticalSnsTopicArn"}]
+        }
+    },
+
+    "InstanceIpAssociation": {
+        "Type": "AWS::EC2::EIPAssociation",
+        "Properties": {
+            "AllocationId": {"Ref": "RadarAppAllocationId"},
+            "InstanceId": {"Ref": "RadarAppInstance"}
+        },
+        "DependsOn": "RadarAppInstance"
+    },
+
+    "RadarAppInstance": {
+        "Type": "AWS::EC2::Instance",
+        "DependsOn": ["RadarAppSecurityGroup", "InstanceKey"],
+        "Properties": {
+            "InstanceType": {"Ref": "RadarAppInstanceType"},
+            "AvailabilityZone": {"Ref": "Zone"},
+            "KeyName": {"Ref": "KeyName"},
+            "Monitoring": "true",
+            "Tags": [
+                {"Key": "Name", "Value": {"Ref": "AWS::StackName"}},
+                {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                {"Key": "Component", "Value": "radar"},
+                {"Key": "Network", "Value": "Public"}
+            ],
+            "SubnetId": {"Ref": "PublicSubnetId"},
+            "ImageId": {"Fn::FindInMap": [ "AmazonLinux201403HVMEBS", {"Ref": "AWS::Region"}, "64" ] },
+            "SecurityGroupIds": [ {"Ref": "RadarAppSecurityGroup"} ],
+            "UserData": {"Fn::Base64": {"Fn::Join": ["", [
+                "#!/bin/bash -v\n",
+                "yum-config-manager --enable epel\n",
+                "yum install -y aws-apitools-cfn.noarch aws-apitools-mon.noarch perl-core perl-Switch perl-Sys-Syslog perl-LWP-Protocol-https python-boto.noarch git tmux wget rsyslog-gnutls\n",
+                "yum update -y aws-cfn-bootstrap\n",
+
+                "function error_exit\n",
+                "{\n",
+                "  /opt/aws/bin/cfn-signal -e 1 -r \"$1\" '", {"Ref": "WaitHandle"}, "'\n",
+                "  exit 1\n",
+                "}\n",
+
+                "# Setup tools on instance\n",
+                "/opt/aws/bin/cfn-init ",
+                "   --stack=", { "Ref": "AWS::StackId"},
+                "   --resource=RadarAppInstance ",
+                "   --configsets=bootstrap ",
+                "   --access-key=",  {"Ref": "InstanceKey"},
+                "   --secret-key=", {"Fn::GetAtt": ["InstanceKey", "SecretAccessKey"]},
+                "   --region=", { "Ref": "AWS::Region"},
+                " > /tmp/cfn-init.log 2>&1 || error_exit $(</tmp/cfn-init.log)\n",
+
+                "# Get Updates _After_ CfnInit Runs\n",
+                "yum update -y\n",
+
+                "cat >> /home/ec2-user/.bash_profile <<EOF\n",
+                "RADAR_ENVIRONMENT=", {"Ref": "Environment"}, "; export RADAR_ENVIRONMENT\n",
+                "AWS_ACCESS_KEY=", {"Ref": "InstanceKey"}, "; export AWS_ACCESS_KEY\n",
+                "AWS_ACCESS_KEY_ID=", {"Ref": "InstanceKey"}, "; export AWS_ACCESS_KEY_ID\n",
+                "AWS_SECRET_ACCESS_KEY=", {"Fn::GetAtt": ["InstanceKey", "SecretAccessKey"]}, "; export AWS_SECRET_ACCESS_KEY\n",
+                "AWS_SECRET_KEY=", {"Fn::GetAtt": ["InstanceKey", "SecretAccessKey"]}, "; export AWS_SECRET_KEY\n",
+                "AWS_CLOUDFORMATION_HOME=/opt/aws/apitools/cfn; export AWS_CLOUDFORMATION_HOME\n",
+                "AWS_CREDENTIALS_FILE=/home/ec2-user/.aws-credentials; export AWS_CREDENTIALS_FILE\n",
+                "AWS_CREDENTIAL_FILE=$AWS_CREDENTIALS_FILE; export AWS_CREDENTIAL_FILE\n",
+                "INSTANCE_ID=`curl -f -s http://169.254.169.254/latest/meta-data/instance-id`; export INSTANCE_ID\n",
+                "INSTANCE_TYPE=`curl -f -s http://169.254.169.254/latest/meta-data/instance-type`; export INSTANCE_TYPE\n",
+                "INSTANCE_PRIVATE_IP=`curl -f -s http://169.254.169.254/latest/meta-data/local-ipv4`; export INSTANCE_PRIVATE_IP\n",
+                "INSTANCE_PUBLIC_IP=`curl -f -s http://169.254.169.254/latest/meta-data/public-ipv4`; export INSTANCE_PUBLIC_IP\n",
+                "INSTANCE_PUBLIC_HOSTNAME=`curl -f -s http://169.254.169.254/latest/meta-data/public-hostname`; export INSTANCE_PUBLIC_HOSTNAME\n",
+                "INSTANCE_NUM_CPUS=`nproc`; export INSTANCE_NUM_CPUS\n",
+                "INSTANCE_TOTAL_MEMORY=`cat /proc/meminfo |grep MemTotal|awk '{print $2}'`; export INSTANCE_TOTAL_MEMORY\n",
+                "EC2_AVAIL_ZONE=`curl -f -s http://169.254.169.254/latest/meta-data/placement/availability-zone`; export EC2_AVAIL_ZONE\n",
+                "EC2_REGION=", {"Ref": "AWS::Region"}, "; export EC2_REGION\n",
+                "PATH=$AWS_CLOUDFORMATION_HOME/bin:$PATH\n",
+                "PATH=/usr/local/bin:/usr/local/sbin:$PATH\n",
+                "PATH=/opt/aws/bin:$PATH\n",
+                "PATH=/usr/local/bin/aws-scripts-mon:$PATH\n",
+                "export PATH\n",
+                "EOF\n",
+
+                "# Start up the cfn-hup daemon to listen for changes to the instance metadata\n",
+                "/opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'\n",
+
+                "chmod +x /usr/local/bin/aws-scripts-mon/*.pl\n",
+
+                "# Create radar user\n",
+                "mkdir -p /home/radar\n",
+                "/usr/sbin/groupadd radar -r\n",
+                "/usr/sbin/useradd radar -r -s /bin/bash -d /home/radar -g radar\n",
+                "chown -R radar:radar /home\n",
+
+                "# Setup logrotate\n",
+                "sed -i 's/\\(.*dateext.*\\)/\\1\\ndateformat -%Y-%m-%d-%s\\n/g' /etc/logrotate.conf\n",
+                "sed -i 's/^\\(weekly.*\\)/#\\1/g' /etc/logrotate.conf\n",
+                "mkdir -p /var/radar/logs/\n",
+                "cat > /etc/logrotate.d/radar <<EOF\n",
+                "/var/radar/logs/*.log {\n",
+                "    missingok\n",
+                "    sharedscripts\n",
+                "    postrotate\n",
+                "        INSTANCE_ID=`curl -f -s http://169.254.169.254/latest/meta-data/instance-id`\n",
+                "        for LOG_FILENAME in `ls -la /var/radar/logs/*.log | sed -e 's/.*radar\\/logs\\/\\(.*\\)\\.log.*/\\1/g' | sort | uniq`; do\n",
+                "            /usr/local/bin/aws s3 sync --quiet --exclude \"*\" --include \"${LOG_FILENAME}.log-*\" /var/radar/logs s3://", {"Ref": "LoggingBucket"}, "/", {"Ref": "Environment"}, "/radar/${LOG_FILENAME}/${INSTANCE_ID}\n",
+                "        done\n",
+                "    endscript\n",
+                "}\n",
+                "EOF\n",
+                "cat > /etc/cron.d/logrotate <<EOF\n",
+                "0 * * * *   root    /usr/sbin/logrotate /etc/logrotate.conf\n",
+                "EOF\n",
+
+                "# All done so signal success\n",
+                "/opt/aws/bin/cfn-signal -e 0 -r \"Radar setup complete\" '", {"Ref": "WaitHandle"}, "'\n"
+            ]]}}
+        },
+        "Metadata": {
+            "AWS::CloudFormation::Authentication": {
+                "S3AccessCreds": {
+                    "type": "S3",
+                    "accessKeyId": {"Ref": "InstanceKey"},
+                    "secretKey": {"Fn::GetAtt": ["InstanceKey", "SecretAccessKey"]},
+                    "buckets": [ "ReleaseBucket" ]
+                }
+            },
+            "AWS::CloudFormation::Init": {
+                "configSets": {
+                    "bootstrap": [
+                        "machine",
+                        "application"
+                    ]
+                },
+                "machine": {
+                    "sources": {
+                        "/usr/local/bin/": "http://ec2-downloads.s3.amazonaws.com/cloudwatch-samples/CloudWatchMonitoringScripts-v1.1.0.zip"
+                    },
+                    "files": {
+                        "/home/ec2-user/.aws-credentials": {
+                            "content": {
+                                "Fn::Join": ["", [
+                                    "AWSAccessKeyId=", {"Ref": "InstanceKey"}, "\n",
+                                    "AWSSecretKey=", {"Fn::GetAtt": ["InstanceKey", "SecretAccessKey"]}, "\n"
+                                ]]
+                            },
+                            "group": "ec2-user",
+                            "mode": "000644",
+                            "owner": "ec2-user"
+                        },
+                        "/etc/cron.d/mon-put-instance-data": {
+                            "content": {
+                                "Fn::Join": ["", [
+                                    "#*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials --mem-util  --disk-path=/ --disk-space-util --auto-scaling=only --from-cron\n",
+                                    "*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials --mem-util  --disk-path=/ --disk-space-util --from-cron\n",
+                                    "*/5 * * * * root /usr/local/bin/aws-scripts-mon/mon-put-instance-data.pl --aws-credential-file=/home/ec2-user/.aws-credentials             --disk-path=/ --disk-space-used --disk-space-avail  --from-cron\n",
+                                    "\n"
+                                ]]
+                            },
+                            "group": "root",
+                            "mode": "000600",
+                            "owner": "root"
+                        },
+                        "/etc/cron.daily/yumupdate.sh": {
+                            "content": {
+                                "Fn::Join": ["", [
+                                    "#!/bin/bash\n",
+                                    "YUM=/usr/bin/yum\n",
+                                    "$YUM -y -R 120 -d 0 -e 0 update yum\n",
+                                    "$YUM -y -R 10 -e 0 -d 0 update\n"
+                                ]]
+                            },
+                            "group": "root",
+                            "mode": "000755",
+                            "owner": "root"
+                        }
+                    }
+                },
+                "application": {
+                    "packages": {
+                        "yum": {
+                            "java-1.6.0-openjdk"    : [],
+                            "tomcat-webapps"		: [],
+                            "tomcat-admin-webapps"	: [],
+                            "tomcat7-log4j"			: [],
+                            "httpd"                 : [],
+                            "mod_ssl"				: [],
+                            "mysql55"				: [],
+                            "mysql55-libs"			: [],
+                            "mysql-connector-java"	: [],
+                            "xfsprogs"				: []
+                        }
+                    },
+                    "files": {
+                    },
+                    "services": {
+                        "sysvinit": {
+                            "httpd": {"enabled": "true", "ensureRunning": "true"},
+                            "tomcat": {"enabled": "true", "ensureRunning": "true"}
+                        }
+                    }
+                }
+            }
+        }
+    },
+
+    "RadarAppSecurityGroup": {
+        "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+            "GroupDescription": "Allow access from bastion as well as outbound HTTP and HTTPS traffic",
+            "VpcId": {"Ref": "VpcId"},
+            "SecurityGroupIngress": [
+                {"IpProtocol": "tcp", "FromPort": "80", "ToPort": "80", "CidrIp": "0.0.0.0/0"},
+                {"IpProtocol": "tcp", "FromPort": "443", "ToPort": "443", "CidrIp": "0.0.0.0/0"},
+                {"IpProtocol": "tcp", "FromPort": "22", "ToPort": "22", "CidrIp": {"Ref": "SshLocation"} }
+            ],
+            "SecurityGroupEgress": [
+                {"IpProtocol": "tcp", "FromPort": "0", "ToPort": "65535", "CidrIp": "0.0.0.0/0"},
+                {"IpProtocol": "udp", "FromPort": "0", "ToPort": "65535", "CidrIp": "0.0.0.0/0"}
+            ],
+            "Tags": [
+                {"Key": "Name", "Value": {"Fn::Join": ["-", [{"Ref": "AWS::StackName"}, "app"]]}},
+                {"Key": "Application", "Value": {"Ref": "AWS::StackId"}},
+                {"Key": "Environment", "Value": {"Ref": "Environment"}},
+                {"Key": "Component", "Value": "radar"},
+                {"Key": "Network", "Value": "Public"}
+            ]
+        }
+    },
+
+    "WaitHandle": {
+        "Type": "AWS::CloudFormation::WaitConditionHandle"
+    },
+    "WaitCondition": {
+        "Type": "AWS::CloudFormation::WaitCondition",
+        "DependsOn": "RadarAppInstance",
+        "Properties": {
+            "Handle": {"Ref": "WaitHandle"},
+            "Timeout": "900",
+            "Count": "1"
+        }
+    }
+},
+"Outputs": { }
+}
